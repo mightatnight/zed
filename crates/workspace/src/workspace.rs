@@ -6307,6 +6307,8 @@ impl Render for Workspace {
             .map(|(_, notification)| notification.entity_id())
             .collect::<Vec<_>>();
         let bottom_dock_layout = WorkspaceSettings::get_global(cx).bottom_dock_layout;
+        let show_status_bar = WorkspaceSettings::get_global(cx).show_status_bar;
+        let show_title_bar = WorkspaceSettings::get_global(cx).show_title_bar;
 
         client_side_decorations(
             self.actions(div(), window, cx)
@@ -6321,7 +6323,7 @@ impl Render for Workspace {
                 .items_start()
                 .text_color(colors.text)
                 .overflow_hidden()
-                .children(self.titlebar_item.clone())
+                .children(if show_title_bar { self.titlebar_item.clone() } else { None })
                 .on_modifiers_changed(move |_, _, cx| {
                     for &id in &notification_entities {
                         cx.notify(id);
@@ -6694,7 +6696,11 @@ impl Render for Workspace {
                                 }))
                                 .children(self.render_notifications(window, cx)),
                         )
-                        .child(self.status_bar.clone())
+                        .children(if show_status_bar {
+                            Some(self.status_bar.clone())
+                        } else {
+                            None
+                        })
                         .child(self.modal_layer.clone())
                         .child(self.toast_layer.clone()),
                 ),

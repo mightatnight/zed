@@ -29,6 +29,8 @@ pub struct WorkspaceSettings {
     pub on_last_window_closed: OnLastWindowClosed,
     pub resize_all_panels_in_dock: Vec<DockPosition>,
     pub close_on_file_delete: bool,
+    pub show_status_bar: bool,
+    pub show_title_bar: bool,
 }
 
 #[derive(Copy, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -202,6 +204,9 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: false
     pub close_on_file_delete: Option<bool>,
+
+    pub show_status_bar: Option<bool>,
+    pub show_title_bar: Option<bool>,
 }
 
 #[derive(Deserialize)]
