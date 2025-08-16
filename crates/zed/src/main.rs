@@ -8,6 +8,7 @@ use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 use client::{Client, ProxySettings, UserStore, parse_zed_link};
 use collab_ui::channel_view::ChannelView;
 use collections::HashMap;
+use crashes::InitCrashHandler;
 use db::kvp::{GLOBAL_KEY_VALUE_STORE, KEY_VALUE_STORE};
 use editor::Editor;
 use extension::ExtensionHostProxy;
@@ -20,6 +21,7 @@ use gpui::{App, AppContext as _, Application, AsyncApp, Focusable as _, UpdateGl
 use gpui_tokio::Tokio;
 use http_client::{Url, read_proxy_from_env};
 use language::LanguageRegistry;
+use onboarding::{FIRST_OPEN, show_onboarding_view};
 use prompt_store::PromptBuilder;
 use reqwest_client::ReqwestClient;
 
@@ -44,7 +46,6 @@ use theme::{
 };
 use util::{ResultExt, TryFutureExt, maybe};
 use uuid::Uuid;
-use welcome::{FIRST_OPEN, show_welcome_view};
 use workspace::{
     AppState, SerializedWorkspaceLocation, Toast, Workspace, WorkspaceSettings, WorkspaceStore,
     notifications::NotificationId,
@@ -251,7 +252,15 @@ pub fn main() {
         return;
     }
 
-    log::info!("========== starting zed ==========");
+    log::info!(
+        "========== starting zed version {}, sha {} ==========",
+        app_version,
+        app_commit_sha
+            .as_ref()
+            .map(|sha| sha.short())
+            .as_deref()
+            .unwrap_or("unknown"),
+    );
 
     let app = Application::new().with_assets(Assets);
 
@@ -261,7 +270,15 @@ pub fn main() {
     let session = app.background_executor().block(Session::new());
 
     app.background_executor()
-        .spawn(crashes::init(session_id.clone()))
+        .spawn(crashes::init(InitCrashHandler {
+            session_id: session_id.clone(),
+            zed_version: app_version.to_string(),
+            release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
+            commit_sha: app_commit_sha
+                .as_ref()
+                .map(|sha| sha.full())
+                .unwrap_or_else(|| "no sha".to_owned()),
+        }))
         .detach();
     reliability::init_panic_hook(
         app_version,
@@ -615,7 +632,6 @@ pub fn main() {
         feedback::init(cx);
         markdown_preview::init(cx);
         svg_preview::init(cx);
-        welcome::init(cx);
         onboarding::init(cx);
         settings_ui::init(cx);
         extensions_ui::init(cx);
@@ -1036,7 +1052,7 @@ async fn restore_or_create_workspace(app_state: Arc<AppState>, cx: &mut AsyncApp
             }
         }
     } else if matches!(KEY_VALUE_STORE.read_kvp(FIRST_OPEN), Ok(None)) {
-        cx.update(|cx| show_welcome_view(app_state, cx))?.await?;
+        cx.update(|cx| show_onboarding_view(app_state, cx))?.await?;
     } else {
         cx.update(|cx| {
             workspace::open_new(

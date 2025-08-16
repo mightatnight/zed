@@ -185,7 +185,6 @@ members = [
     "crates/watch",
     "crates/web_search",
     "crates/web_search_providers",
-    "crates/welcome",
     "crates/workspace",
     "crates/worktree",
     "crates/x_ai",
@@ -364,6 +363,7 @@ remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
 rich_text = { path = "crates/rich_text" }
+rodio = { version = "0.21.1", default-features = false }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
 rules_library = { path = "crates/rules_library" }
@@ -412,7 +412,6 @@ vim_mode_setting = { path = "crates/vim_mode_setting" }
 watch = { path = "crates/watch" }
 web_search = { path = "crates/web_search" }
 web_search_providers = { path = "crates/web_search_providers" }
-welcome = { path = "crates/welcome" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
@@ -427,7 +426,7 @@ zlog_settings = { path = "crates/zlog_settings" }
 #
 
 agentic-coding-protocol = "0.0.10"
-agent-client-protocol = "0.0.23"
+agent-client-protocol = "0.0.24"
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty.git", branch = "add-hush-login-flag" }
 any_vec = "0.14"
@@ -667,20 +666,6 @@ workspace-hack = "0.1.0"
 # version is released.
 yawc = { git = "https://github.com/deviant-forks/yawc", rev = "1899688f3e69ace4545aceb97b2a13881cf26142" }
 zstd = "0.11"
-
-[workspace.dependencies.async-stripe]
-git = "https://github.com/zed-industries/async-stripe"
-rev = "3672dd4efb7181aa597bf580bf5a2f5d23db6735"
-default-features = false
-features = [
-    "runtime-tokio-hyper-rustls",
-    "billing",
-    "checkout",
-    "events",
-    # The features below are only enabled to get the `events` feature to build.
-    "chrono",
-    "connect",
-]
 
 [workspace.dependencies.windows]
 version = "0.61"
