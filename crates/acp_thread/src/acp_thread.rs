@@ -24,6 +24,7 @@ use std::fmt::{Formatter, Write};
 use std::ops::Range;
 use std::process::ExitStatus;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use std::{fmt::Display, mem, path::PathBuf, sync::Arc};
 use ui::App;
 use util::ResultExt;
@@ -485,7 +486,7 @@ impl ContentBlock {
     }
 
     fn resource_link_md(uri: &str) -> String {
-        if let Some(uri) = MentionUri::parse(&uri).log_err() {
+        if let Some(uri) = MentionUri::parse(uri).log_err() {
             uri.as_link().to_string()
         } else {
             uri.to_string()
@@ -658,6 +659,15 @@ impl PlanEntry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RetryStatus {
+    pub last_error: SharedString,
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub started_at: Instant,
+    pub duration: Duration,
+}
+
 pub struct AcpThread {
     title: SharedString,
     entries: Vec<AgentThreadEntry>,
@@ -676,6 +686,7 @@ pub enum AcpThreadEvent {
     EntryUpdated(usize),
     EntriesRemoved(Range<usize>),
     ToolAuthorizationRequired,
+    Retry(RetryStatus),
     Stopped,
     Error,
     ServerExited(ExitStatus),
@@ -914,6 +925,10 @@ impl AcpThread {
     fn push_entry(&mut self, entry: AgentThreadEntry, cx: &mut Context<Self>) {
         self.entries.push(entry);
         cx.emit(AcpThreadEvent::NewEntry);
+    }
+
+    pub fn update_retry_status(&mut self, status: RetryStatus, cx: &mut Context<Self>) {
+        cx.emit(AcpThreadEvent::Retry(status));
     }
 
     pub fn update_tool_call(
@@ -1416,7 +1431,7 @@ impl AcpThread {
     fn user_message(&self, id: &UserMessageId) -> Option<&UserMessage> {
         self.entries.iter().find_map(|entry| {
             if let AgentThreadEntry::UserMessage(message) = entry {
-                if message.id.as_ref() == Some(&id) {
+                if message.id.as_ref() == Some(id) {
                     Some(message)
                 } else {
                     None
@@ -1430,7 +1445,7 @@ impl AcpThread {
     fn user_message_mut(&mut self, id: &UserMessageId) -> Option<(usize, &mut UserMessage)> {
         self.entries.iter_mut().enumerate().find_map(|(ix, entry)| {
             if let AgentThreadEntry::UserMessage(message) = entry {
-                if message.id.as_ref() == Some(&id) {
+                if message.id.as_ref() == Some(id) {
                     Some((ix, message))
                 } else {
                     None
@@ -2356,7 +2371,7 @@ mod tests {
 
         fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
             let sessions = self.sessions.lock();
-            let thread = sessions.get(&session_id).unwrap().clone();
+            let thread = sessions.get(session_id).unwrap().clone();
 
             cx.spawn(async move |cx| {
                 thread
