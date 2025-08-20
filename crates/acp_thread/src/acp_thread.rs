@@ -3,9 +3,13 @@ mod diff;
 mod mention;
 mod terminal;
 
+use collections::HashSet;
 pub use connection::*;
 pub use diff::*;
+use language::language_settings::FormatOnSave;
 pub use mention::*;
+use project::lsp_store::{FormatTrigger, LspFormatTarget};
+use serde::{Deserialize, Serialize};
 pub use terminal::*;
 
 use action_log::ActionLog;
@@ -49,7 +53,7 @@ impl UserMessage {
         if self
             .checkpoint
             .as_ref()
-            .map_or(false, |checkpoint| checkpoint.show)
+            .is_some_and(|checkpoint| checkpoint.show)
         {
             writeln!(markdown, "## User (checkpoint)").unwrap();
         } else {
@@ -249,14 +253,13 @@ impl ToolCall {
         }
 
         if let Some(raw_output) = raw_output {
-            if self.content.is_empty() {
-                if let Some(markdown) = markdown_for_raw_output(&raw_output, &language_registry, cx)
-                {
-                    self.content
-                        .push(ToolCallContent::ContentBlock(ContentBlock::Markdown {
-                            markdown,
-                        }));
-                }
+            if self.content.is_empty()
+                && let Some(markdown) = markdown_for_raw_output(&raw_output, &language_registry, cx)
+            {
+                self.content
+                    .push(ToolCallContent::ContentBlock(ContentBlock::Markdown {
+                        markdown,
+                    }));
             }
             self.raw_output = Some(raw_output);
         }
@@ -298,11 +301,9 @@ impl ToolCall {
     ) -> Option<AgentLocation> {
         let buffer = project
             .update(cx, |project, cx| {
-                if let Some(path) = project.project_path_for_absolute_path(&location.path, cx) {
-                    Some(project.open_buffer(path, cx))
-                } else {
-                    None
-                }
+                project
+                    .project_path_for_absolute_path(&location.path, cx)
+                    .map(|path| project.open_buffer(path, cx))
             })
             .ok()??;
         let buffer = buffer.await.log_err()?;
@@ -430,11 +431,11 @@ impl ContentBlock {
         language_registry: &Arc<LanguageRegistry>,
         cx: &mut App,
     ) {
-        if matches!(self, ContentBlock::Empty) {
-            if let acp::ContentBlock::ResourceLink(resource_link) = block {
-                *self = ContentBlock::ResourceLink { resource_link };
-                return;
-            }
+        if matches!(self, ContentBlock::Empty)
+            && let acp::ContentBlock::ResourceLink(resource_link) = block
+        {
+            *self = ContentBlock::ResourceLink { resource_link };
+            return;
         }
 
         let new_content = self.block_string_contents(block);
@@ -468,7 +469,7 @@ impl ContentBlock {
 
     fn block_string_contents(&self, block: acp::ContentBlock) -> String {
         match block {
-            acp::ContentBlock::Text(text_content) => text_content.text.clone(),
+            acp::ContentBlock::Text(text_content) => text_content.text,
             acp::ContentBlock::ResourceLink(resource_link) => {
                 Self::resource_link_md(&resource_link.uri)
             }
@@ -538,9 +539,15 @@ impl ToolCallContent {
             acp::ToolCallContent::Content { content } => {
                 Self::ContentBlock(ContentBlock::new(content, &language_registry, cx))
             }
-            acp::ToolCallContent::Diff { diff } => {
-                Self::Diff(cx.new(|cx| Diff::from_acp(diff, language_registry, cx)))
-            }
+            acp::ToolCallContent::Diff { diff } => Self::Diff(cx.new(|cx| {
+                Diff::finalized(
+                    diff.path,
+                    diff.old_text,
+                    diff.new_text,
+                    language_registry,
+                    cx,
+                )
+            })),
         }
     }
 
@@ -659,6 +666,43 @@ impl PlanEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub max_tokens: u64,
+    pub used_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn ratio(&self) -> TokenUsageRatio {
+        #[cfg(debug_assertions)]
+        let warning_threshold: f32 = std::env::var("ZED_THREAD_WARNING_THRESHOLD")
+            .unwrap_or("0.8".to_string())
+            .parse()
+            .unwrap();
+        #[cfg(not(debug_assertions))]
+        let warning_threshold: f32 = 0.8;
+
+        // When the maximum is unknown because there is no selected model,
+        // avoid showing the token limit warning.
+        if self.max_tokens == 0 {
+            TokenUsageRatio::Normal
+        } else if self.used_tokens >= self.max_tokens {
+            TokenUsageRatio::Exceeded
+        } else if self.used_tokens as f32 / self.max_tokens as f32 >= warning_threshold {
+            TokenUsageRatio::Warning
+        } else {
+            TokenUsageRatio::Normal
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenUsageRatio {
+    Normal,
+    Warning,
+    Exceeded,
+}
+
 #[derive(Debug, Clone)]
 pub struct RetryStatus {
     pub last_error: SharedString,
@@ -678,18 +722,21 @@ pub struct AcpThread {
     send_task: Option<Task<()>>,
     connection: Rc<dyn AgentConnection>,
     session_id: acp::SessionId,
+    token_usage: Option<TokenUsage>,
 }
 
 #[derive(Debug)]
 pub enum AcpThreadEvent {
     NewEntry,
+    TitleUpdated,
+    TokenUsageUpdated,
     EntryUpdated(usize),
     EntriesRemoved(Range<usize>),
     ToolAuthorizationRequired,
     Retry(RetryStatus),
     Stopped,
     Error,
-    ServerExited(ExitStatus),
+    LoadError(LoadError),
 }
 
 impl EventEmitter<AcpThreadEvent> for AcpThread {}
@@ -703,20 +750,30 @@ pub enum ThreadStatus {
 
 #[derive(Debug, Clone)]
 pub enum LoadError {
+    NotInstalled {
+        error_message: SharedString,
+        install_message: SharedString,
+        install_command: String,
+    },
     Unsupported {
         error_message: SharedString,
         upgrade_message: SharedString,
         upgrade_command: String,
     },
-    Exited(i32),
+    Exited {
+        status: ExitStatus,
+    },
     Other(SharedString),
 }
 
 impl Display for LoadError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoadError::Unsupported { error_message, .. } => write!(f, "{}", error_message),
-            LoadError::Exited(status) => write!(f, "Server exited with status {}", status),
+            LoadError::NotInstalled { error_message, .. }
+            | LoadError::Unsupported { error_message, .. } => {
+                write!(f, "{error_message}")
+            }
+            LoadError::Exited { status } => write!(f, "Server exited with status {status}"),
             LoadError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -729,11 +786,9 @@ impl AcpThread {
         title: impl Into<SharedString>,
         connection: Rc<dyn AgentConnection>,
         project: Entity<Project>,
+        action_log: Entity<ActionLog>,
         session_id: acp::SessionId,
-        cx: &mut Context<Self>,
     ) -> Self {
-        let action_log = cx.new(|_| ActionLog::new(project.clone()));
-
         Self {
             action_log,
             shared_buffers: Default::default(),
@@ -744,6 +799,7 @@ impl AcpThread {
             send_task: None,
             connection,
             session_id,
+            token_usage: None,
         }
     }
 
@@ -781,6 +837,10 @@ impl AcpThread {
         } else {
             ThreadStatus::Idle
         }
+    }
+
+    pub fn token_usage(&self) -> Option<&TokenUsage> {
+        self.token_usage.as_ref()
     }
 
     pub fn has_pending_edit_tool_calls(&self) -> bool {
@@ -927,6 +987,17 @@ impl AcpThread {
         cx.emit(AcpThreadEvent::NewEntry);
     }
 
+    pub fn update_title(&mut self, title: SharedString, cx: &mut Context<Self>) -> Result<()> {
+        self.title = title;
+        cx.emit(AcpThreadEvent::TitleUpdated);
+        Ok(())
+    }
+
+    pub fn update_token_usage(&mut self, usage: Option<TokenUsage>, cx: &mut Context<Self>) {
+        self.token_usage = usage;
+        cx.emit(AcpThreadEvent::TokenUsageUpdated);
+    }
+
     pub fn update_retry_status(&mut self, status: RetryStatus, cx: &mut Context<Self>) {
         cx.emit(AcpThreadEvent::Retry(status));
     }
@@ -947,7 +1018,7 @@ impl AcpThread {
                 let location_updated = update.fields.locations.is_some();
                 current_call.update_fields(update.fields, languages, cx);
                 if location_updated {
-                    self.resolve_locations(update.id.clone(), cx);
+                    self.resolve_locations(update.id, cx);
                 }
             }
             ToolCallUpdate::UpdateDiff(update) => {
@@ -1009,6 +1080,22 @@ impl AcpThread {
         // At the moment, it doesn't seem like a hashmap would be a good fit for this use case.
         self.entries
             .iter_mut()
+            .enumerate()
+            .rev()
+            .find_map(|(index, tool_call)| {
+                if let AgentThreadEntry::ToolCall(tool_call) = tool_call
+                    && &tool_call.id == id
+                {
+                    Some((index, tool_call))
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub fn tool_call(&mut self, id: &acp::ToolCallId) -> Option<(usize, &ToolCall)> {
+        self.entries
+            .iter()
             .enumerate()
             .rev()
             .find_map(|(index, tool_call)| {
@@ -1282,6 +1369,8 @@ impl AcpThread {
                 .await?;
 
             this.update(cx, |this, cx| {
+                this.project
+                    .update(cx, |project, cx| project.set_agent_location(None, cx));
                 match response {
                     Ok(Err(e)) => {
                         this.send_task.take();
@@ -1570,30 +1659,59 @@ impl AcpThread {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            cx.update(|cx| {
-                project.update(cx, |project, cx| {
-                    project.set_agent_location(
-                        Some(AgentLocation {
-                            buffer: buffer.downgrade(),
-                            position: edits
-                                .last()
-                                .map(|(range, _)| range.end)
-                                .unwrap_or(Anchor::MIN),
-                        }),
-                        cx,
-                    );
-                });
 
+            project.update(cx, |project, cx| {
+                project.set_agent_location(
+                    Some(AgentLocation {
+                        buffer: buffer.downgrade(),
+                        position: edits
+                            .last()
+                            .map(|(range, _)| range.end)
+                            .unwrap_or(Anchor::MIN),
+                    }),
+                    cx,
+                );
+            })?;
+
+            let format_on_save = cx.update(|cx| {
                 action_log.update(cx, |action_log, cx| {
                     action_log.buffer_read(buffer.clone(), cx);
                 });
-                buffer.update(cx, |buffer, cx| {
+
+                let format_on_save = buffer.update(cx, |buffer, cx| {
                     buffer.edit(edits, None, cx);
+
+                    let settings = language::language_settings::language_settings(
+                        buffer.language().map(|l| l.name()),
+                        buffer.file(),
+                        cx,
+                    );
+
+                    settings.format_on_save != FormatOnSave::Off
                 });
                 action_log.update(cx, |action_log, cx| {
                     action_log.buffer_edited(buffer.clone(), cx);
                 });
+                format_on_save
             })?;
+
+            if format_on_save {
+                let format_task = project.update(cx, |project, cx| {
+                    project.format(
+                        HashSet::from_iter([buffer.clone()]),
+                        LspFormatTarget::Buffers,
+                        false,
+                        FormatTrigger::Save,
+                        cx,
+                    )
+                })?;
+                format_task.await.log_err();
+
+                action_log.update(cx, |action_log, cx| {
+                    action_log.buffer_edited(buffer.clone(), cx);
+                })?;
+            }
+
             project
                 .update(cx, |project, cx| project.save_buffer(buffer, cx))?
                 .await
@@ -1604,8 +1722,8 @@ impl AcpThread {
         self.entries.iter().map(|e| e.to_markdown(cx)).collect()
     }
 
-    pub fn emit_server_exited(&mut self, status: ExitStatus, cx: &mut Context<Self>) {
-        cx.emit(AcpThreadEvent::ServerExited(status));
+    pub fn emit_load_error(&mut self, error: LoadError, cx: &mut Context<Self>) {
+        cx.emit(AcpThreadEvent::LoadError(error));
     }
 }
 
@@ -1656,7 +1774,7 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
     use futures::{channel::mpsc, future::LocalBoxFuture, select};
-    use gpui::{AsyncApp, TestAppContext, WeakEntity};
+    use gpui::{App, AsyncApp, TestAppContext, WeakEntity};
     use indoc::indoc;
     use project::{FakeFs, Fs};
     use rand::Rng as _;
@@ -2143,7 +2261,7 @@ mod tests {
                 "}
             );
         });
-        assert_eq!(fs.files(), vec![Path::new("/test/file-0")]);
+        assert_eq!(fs.files(), vec![Path::new(path!("/test/file-0"))]);
 
         cx.update(|cx| thread.update(cx, |thread, cx| thread.send(vec!["ipsum".into()], cx)))
             .await
@@ -2173,7 +2291,10 @@ mod tests {
         });
         assert_eq!(
             fs.files(),
-            vec![Path::new("/test/file-0"), Path::new("/test/file-1")]
+            vec![
+                Path::new(path!("/test/file-0")),
+                Path::new(path!("/test/file-1"))
+            ]
         );
 
         // Checkpoint isn't stored when there are no changes.
@@ -2214,7 +2335,10 @@ mod tests {
         });
         assert_eq!(
             fs.files(),
-            vec![Path::new("/test/file-0"), Path::new("/test/file-1")]
+            vec![
+                Path::new(path!("/test/file-0")),
+                Path::new(path!("/test/file-1"))
+            ]
         );
 
         // Rewinding the conversation truncates the history and restores the checkpoint.
@@ -2242,7 +2366,7 @@ mod tests {
                 "}
             );
         });
-        assert_eq!(fs.files(), vec![Path::new("/test/file-0")]);
+        assert_eq!(fs.files(), vec![Path::new(path!("/test/file-0"))]);
     }
 
     async fn run_until_first_tool_call(
@@ -2326,7 +2450,7 @@ mod tests {
             self: Rc<Self>,
             project: Entity<Project>,
             _cwd: &Path,
-            cx: &mut gpui::App,
+            cx: &mut App,
         ) -> Task<gpui::Result<Entity<AcpThread>>> {
             let session_id = acp::SessionId(
                 rand::thread_rng()
@@ -2336,8 +2460,16 @@ mod tests {
                     .collect::<String>()
                     .into(),
             );
-            let thread =
-                cx.new(|cx| AcpThread::new("Test", self.clone(), project, session_id.clone(), cx));
+            let action_log = cx.new(|_| ActionLog::new(project.clone()));
+            let thread = cx.new(|_cx| {
+                AcpThread::new(
+                    "Test",
+                    self.clone(),
+                    project,
+                    action_log,
+                    session_id.clone(),
+                )
+            });
             self.sessions.lock().insert(session_id, thread.downgrade());
             Task::ready(Ok(thread))
         }
