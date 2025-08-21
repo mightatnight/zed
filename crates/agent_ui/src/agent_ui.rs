@@ -128,6 +128,12 @@ actions!(
     ]
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Action)]
+#[action(namespace = agent)]
+#[action(deprecated_aliases = ["assistant::QuoteSelection"])]
+/// Quotes the current selection in the agent panel's message editor.
+pub struct QuoteSelection;
+
 /// Creates a new conversation thread, optionally based on an existing thread.
 #[derive(Default, Clone, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = agent)]
@@ -144,6 +150,13 @@ pub struct NewThread {
 pub struct NewExternalAgentThread {
     /// Which agent to use for the conversation.
     agent: Option<ExternalAgent>,
+}
+
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = agent)]
+#[serde(deny_unknown_fields)]
+pub struct NewNativeAgentThreadFromSummary {
+    from_session_id: agent_client_protocol::SessionId,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]

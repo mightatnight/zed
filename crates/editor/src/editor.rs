@@ -4876,11 +4876,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> bool {
         let position = self.selections.newest_anchor().head();
-        let multibuffer = self.buffer.read(cx);
-        let Some(buffer) = position
-            .buffer_id
-            .and_then(|buffer_id| multibuffer.buffer(buffer_id))
-        else {
+        let Some(buffer) = self.buffer.read(cx).buffer_for_anchor(position, cx) else {
             return false;
         };
 
@@ -5844,7 +5840,7 @@ impl Editor {
             multibuffer_anchor.start.to_offset(&snapshot)
                 ..multibuffer_anchor.end.to_offset(&snapshot)
         };
-        if newest_anchor.head().buffer_id != Some(buffer.remote_id()) {
+        if snapshot.buffer_id_for_anchor(newest_anchor.head()) != Some(buffer.remote_id()) {
             return None;
         }
 
@@ -11021,7 +11017,7 @@ impl Editor {
                 let mut col = 0;
                 let mut changed = false;
 
-                while let Some(ch) = chars.next() {
+                for ch in chars.by_ref() {
                     match ch {
                         ' ' => {
                             reindented_line.push(' ');
@@ -11077,7 +11073,7 @@ impl Editor {
                 let mut first_non_indent_char = None;
                 let mut changed = false;
 
-                while let Some(ch) = chars.next() {
+                for ch in chars.by_ref() {
                     match ch {
                         ' ' => {
                             // Keep track of spaces. Append \t when we reach tab_size
@@ -15714,7 +15710,9 @@ impl Editor {
         };
 
         cx.spawn_in(window, async move |editor, cx| {
-            let definitions = definitions.await?;
+            let Some(definitions) = definitions.await? else {
+                return Ok(Navigated::No);
+            };
             let navigated = editor
                 .update_in(cx, |editor, window, cx| {
                     editor.navigate_to_hover_links(
@@ -16056,7 +16054,9 @@ impl Editor {
                 }
             });
 
-            let locations = references.await?;
+            let Some(locations) = references.await? else {
+                return anyhow::Ok(Navigated::No);
+            };
             if locations.is_empty() {
                 return anyhow::Ok(Navigated::No);
             }
@@ -21841,7 +21841,7 @@ pub trait SemanticsProvider {
         buffer: &Entity<Buffer>,
         position: text::Anchor,
         cx: &mut App,
-    ) -> Option<Task<Vec<project::Hover>>>;
+    ) -> Option<Task<Option<Vec<project::Hover>>>>;
 
     fn inline_values(
         &self,
@@ -21880,7 +21880,7 @@ pub trait SemanticsProvider {
         position: text::Anchor,
         kind: GotoDefinitionKind,
         cx: &mut App,
-    ) -> Option<Task<Result<Vec<LocationLink>>>>;
+    ) -> Option<Task<Result<Option<Vec<LocationLink>>>>>;
 
     fn range_for_rename(
         &self,
@@ -21993,7 +21993,13 @@ impl CodeActionProvider for Entity<Project> {
                 Ok(code_lens_actions
                     .context("code lens fetch")?
                     .into_iter()
-                    .chain(code_actions.context("code action fetch")?)
+                    .flatten()
+                    .chain(
+                        code_actions
+                            .context("code action fetch")?
+                            .into_iter()
+                            .flatten(),
+                    )
                     .collect())
             })
         })
@@ -22288,7 +22294,7 @@ impl SemanticsProvider for Entity<Project> {
         buffer: &Entity<Buffer>,
         position: text::Anchor,
         cx: &mut App,
-    ) -> Option<Task<Vec<project::Hover>>> {
+    ) -> Option<Task<Option<Vec<project::Hover>>>> {
         Some(self.update(cx, |project, cx| project.hover(buffer, position, cx)))
     }
 
@@ -22309,7 +22315,7 @@ impl SemanticsProvider for Entity<Project> {
         position: text::Anchor,
         kind: GotoDefinitionKind,
         cx: &mut App,
-    ) -> Option<Task<Result<Vec<LocationLink>>>> {
+    ) -> Option<Task<Result<Option<Vec<LocationLink>>>>> {
         Some(self.update(cx, |project, cx| match kind {
             GotoDefinitionKind::Symbol => project.definitions(buffer, position, cx),
             GotoDefinitionKind::Declaration => project.declarations(buffer, position, cx),

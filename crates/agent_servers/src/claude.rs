@@ -319,6 +319,14 @@ impl AgentConnection for ClaudeAgentConnection {
         cx.foreground_executor().spawn(async move { end_rx.await? })
     }
 
+    fn prompt_capabilities(&self) -> acp::PromptCapabilities {
+        acp::PromptCapabilities {
+            image: true,
+            audio: false,
+            embedded_context: true,
+        }
+    }
+
     fn cancel(&self, session_id: &acp::SessionId, _cx: &mut App) {
         let sessions = self.sessions.borrow();
         let Some(session) = sessions.get(session_id) else {
@@ -697,7 +705,7 @@ impl ClaudeAgentSession {
                     let stop_reason = match subtype {
                         ResultErrorType::Success => acp::StopReason::EndTurn,
                         ResultErrorType::ErrorMaxTurns => acp::StopReason::MaxTurnRequests,
-                        ResultErrorType::ErrorDuringExecution => acp::StopReason::Canceled,
+                        ResultErrorType::ErrorDuringExecution => acp::StopReason::Cancelled,
                     };
                     end_turn_tx
                         .send(Ok(acp::PromptResponse { stop_reason }))
@@ -1085,7 +1093,7 @@ pub(crate) mod tests {
     use gpui::TestAppContext;
     use serde_json::json;
 
-    crate::common_e2e_tests!(ClaudeCode, allow_option_id = "allow");
+    crate::common_e2e_tests!(async |_, _, _| ClaudeCode, allow_option_id = "allow");
 
     pub fn local_command() -> AgentServerCommand {
         AgentServerCommand {
@@ -1117,7 +1125,7 @@ pub(crate) mod tests {
 
         thread.read_with(cx, |thread, _| {
             entries_len = thread.plan().entries.len();
-            assert!(thread.plan().entries.len() > 0, "Empty plan");
+            assert!(!thread.plan().entries.is_empty(), "Empty plan");
         });
 
         thread

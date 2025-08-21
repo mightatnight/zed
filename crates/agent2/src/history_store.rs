@@ -111,6 +111,10 @@ impl HistoryStore {
         }
     }
 
+    pub fn thread_from_session_id(&self, session_id: &acp::SessionId) -> Option<&DbThreadMetadata> {
+        self.threads.iter().find(|thread| &thread.id == session_id)
+    }
+
     pub fn delete_thread(
         &mut self,
         id: acp::SessionId,
@@ -340,5 +344,9 @@ impl HistoryStore {
         self.recently_opened_entries
             .retain(|old_entry| old_entry != entry);
         self.save_recently_opened_entries(cx);
+    }
+
+    pub fn recent_entries(&self, limit: usize, cx: &mut Context<Self>) -> Vec<HistoryEntry> {
+        self.entries(cx).into_iter().take(limit).collect()
     }
 }

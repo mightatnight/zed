@@ -30,7 +30,7 @@ use crate::{
     thread_history::{HistoryEntryElement, ThreadHistory},
     ui::{AgentOnboardingModal, EndTrialUpsell},
 };
-use crate::{ExternalAgent, NewExternalAgentThread};
+use crate::{ExternalAgent, NewExternalAgentThread, NewNativeAgentThreadFromSummary};
 use agent::{
     Thread, ThreadError, ThreadEvent, ThreadId, ThreadSummary, TokenUsageRatio,
     context_store::ContextStore,
@@ -98,6 +98,16 @@ pub fn init(cx: &mut App) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
                 })
+                .register_action(
+                    |workspace, action: &NewNativeAgentThreadFromSummary, window, cx| {
+                        if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                            panel.update(cx, |panel, cx| {
+                                panel.new_native_agent_thread_from_summary(action, window, cx)
+                            });
+                            workspace.focus_panel::<AgentPanel>(window, cx);
+                        }
+                    },
+                )
                 .register_action(|workspace, _: &OpenHistory, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
@@ -120,7 +130,7 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                         panel.update(cx, |panel, cx| {
-                            panel.external_thread(action.agent, None, window, cx)
+                            panel.external_thread(action.agent, None, None, window, cx)
                         });
                     }
                 })
@@ -670,6 +680,7 @@ impl AgentPanel {
                     this.external_thread(
                         Some(crate::ExternalAgent::NativeAgent),
                         Some(thread.clone()),
+                        None,
                         window,
                         cx,
                     );
@@ -892,6 +903,16 @@ impl AgentPanel {
         }
     }
 
+    fn active_thread_view(&self) -> Option<&Entity<AcpThreadView>> {
+        match &self.active_view {
+            ActiveView::ExternalAgentThread { thread_view } => Some(thread_view),
+            ActiveView::Thread { .. }
+            | ActiveView::TextThread { .. }
+            | ActiveView::History
+            | ActiveView::Configuration => None,
+        }
+    }
+
     fn new_thread(&mut self, action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
         if cx.has_flag::<GeminiAndNativeFeatureFlag>() {
             return self.new_agent_thread(AgentType::NativeAgent, window, cx);
@@ -974,6 +995,29 @@ impl AgentPanel {
         AgentDiff::set_active_thread(&self.workspace, thread.clone(), window, cx);
     }
 
+    fn new_native_agent_thread_from_summary(
+        &mut self,
+        action: &NewNativeAgentThreadFromSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self
+            .acp_history_store
+            .read(cx)
+            .thread_from_session_id(&action.from_session_id)
+        else {
+            return;
+        };
+
+        self.external_thread(
+            Some(ExternalAgent::NativeAgent),
+            None,
+            Some(thread.clone()),
+            window,
+            cx,
+        );
+    }
+
     fn new_prompt_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let context = self
             .context_store
@@ -1015,6 +1059,7 @@ impl AgentPanel {
         &mut self,
         agent_choice: Option<crate::ExternalAgent>,
         resume_thread: Option<DbThreadMetadata>,
+        summarize_thread: Option<DbThreadMetadata>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1083,6 +1128,7 @@ impl AgentPanel {
                     crate::acp::AcpThreadView::new(
                         server,
                         resume_thread,
+                        summarize_thread,
                         workspace.clone(),
                         project,
                         this.acp_history_store.clone(),
@@ -1754,6 +1800,7 @@ impl AgentPanel {
                                 agent2::HistoryEntry::AcpThread(entry) => this.external_thread(
                                     Some(ExternalAgent::NativeAgent),
                                     Some(entry.clone()),
+                                    None,
                                     window,
                                     cx,
                                 ),
@@ -1823,15 +1870,23 @@ impl AgentPanel {
             AgentType::TextThread => {
                 window.dispatch_action(NewTextThread.boxed_clone(), cx);
             }
-            AgentType::NativeAgent => {
-                self.external_thread(Some(crate::ExternalAgent::NativeAgent), None, window, cx)
-            }
+            AgentType::NativeAgent => self.external_thread(
+                Some(crate::ExternalAgent::NativeAgent),
+                None,
+                None,
+                window,
+                cx,
+            ),
             AgentType::Gemini => {
-                self.external_thread(Some(crate::ExternalAgent::Gemini), None, window, cx)
+                self.external_thread(Some(crate::ExternalAgent::Gemini), None, None, window, cx)
             }
-            AgentType::ClaudeCode => {
-                self.external_thread(Some(crate::ExternalAgent::ClaudeCode), None, window, cx)
-            }
+            AgentType::ClaudeCode => self.external_thread(
+                Some(crate::ExternalAgent::ClaudeCode),
+                None,
+                None,
+                window,
+                cx,
+            ),
         }
     }
 
@@ -1841,7 +1896,13 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.external_thread(Some(ExternalAgent::NativeAgent), Some(thread), window, cx);
+        self.external_thread(
+            Some(ExternalAgent::NativeAgent),
+            Some(thread),
+            None,
+            window,
+            cx,
+        );
     }
 }
 
@@ -2358,8 +2419,10 @@ impl AgentPanel {
         let focus_handle = self.focus_handle(cx);
 
         let active_thread = match &self.active_view {
-            ActiveView::Thread { thread, .. } => Some(thread.read(cx).thread().clone()),
-            ActiveView::ExternalAgentThread { .. }
+            ActiveView::ExternalAgentThread { thread_view } => {
+                thread_view.read(cx).as_native_thread(cx)
+            }
+            ActiveView::Thread { .. }
             | ActiveView::TextThread { .. }
             | ActiveView::History
             | ActiveView::Configuration => None,
@@ -2396,15 +2459,15 @@ impl AgentPanel {
                                 let thread = active_thread.read(cx);
 
                                 if !thread.is_empty() {
-                                    let thread_id = thread.id().clone();
+                                    let session_id = thread.id().clone();
                                     this.item(
                                         ContextMenuEntry::new("New From Summary")
                                             .icon(IconName::ThreadFromSummary)
                                             .icon_color(Color::Muted)
                                             .handler(move |window, cx| {
                                                 window.dispatch_action(
-                                                    Box::new(NewThread {
-                                                        from_thread_id: Some(thread_id.clone()),
+                                                    Box::new(NewNativeAgentThreadFromSummary {
+                                                        from_session_id: session_id.clone(),
                                                     }),
                                                     cx,
                                                 );
@@ -3829,7 +3892,11 @@ impl AgentPanelDelegate for ConcreteAssistantPanelDelegate {
             // Wait to create a new context until the workspace is no longer
             // being updated.
             cx.defer_in(window, move |panel, window, cx| {
-                if let Some(message_editor) = panel.active_message_editor() {
+                if let Some(thread_view) = panel.active_thread_view() {
+                    thread_view.update(cx, |thread_view, cx| {
+                        thread_view.insert_selections(window, cx);
+                    });
+                } else if let Some(message_editor) = panel.active_message_editor() {
                     message_editor.update(cx, |message_editor, cx| {
                         message_editor.context_store().update(cx, |store, cx| {
                             let buffer = buffer.read(cx);

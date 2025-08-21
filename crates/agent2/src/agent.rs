@@ -913,6 +913,14 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         })
     }
 
+    fn prompt_capabilities(&self) -> acp::PromptCapabilities {
+        acp::PromptCapabilities {
+            image: true,
+            audio: false,
+            embedded_context: true,
+        }
+    }
+
     fn resume(
         &self,
         session_id: &acp::SessionId,
@@ -948,8 +956,33 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         })
     }
 
+    fn telemetry(&self) -> Option<Rc<dyn acp_thread::AgentTelemetry>> {
+        Some(Rc::new(self.clone()) as Rc<dyn acp_thread::AgentTelemetry>)
+    }
+
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
+    }
+}
+
+impl acp_thread::AgentTelemetry for NativeAgentConnection {
+    fn agent_name(&self) -> String {
+        "Zed".into()
+    }
+
+    fn thread_data(
+        &self,
+        session_id: &acp::SessionId,
+        cx: &mut App,
+    ) -> Task<Result<serde_json::Value>> {
+        let Some(session) = self.0.read(cx).sessions.get(session_id) else {
+            return Task::ready(Err(anyhow!("Session not found")));
+        };
+
+        let task = session.thread.read(cx).to_db(cx);
+        cx.background_spawn(async move {
+            serde_json::to_value(task.await).context("Failed to serialize thread")
+        })
     }
 }
 
@@ -1236,18 +1269,12 @@ mod tests {
         let model = Arc::new(FakeLanguageModel::default());
         let summary_model = Arc::new(FakeLanguageModel::default());
         thread.update(cx, |thread, cx| {
-            thread.set_model(model, cx);
-            thread.set_summarization_model(Some(summary_model), cx);
+            thread.set_model(model.clone(), cx);
+            thread.set_summarization_model(Some(summary_model.clone()), cx);
         });
         cx.run_until_parked();
         assert_eq!(history_entries(&history_store, cx), vec![]);
 
-        let model = thread.read_with(cx, |thread, _| thread.model().unwrap().clone());
-        let model = model.as_fake();
-        let summary_model = thread.read_with(cx, |thread, _| {
-            thread.summarization_model().unwrap().clone()
-        });
-        let summary_model = summary_model.as_fake();
         let send = acp_thread.update(cx, |thread, cx| {
             thread.send(
                 vec![
